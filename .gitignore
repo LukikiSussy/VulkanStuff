@@ -244,7 +244,6 @@ libs/vulkan/*.so
 .vscode/*
 
 # Other stuff
-Shaders
 ExternalLibraries
 CompiledShaders
 VGame
