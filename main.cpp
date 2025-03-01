@@ -3,6 +3,9 @@
 #define GLM_FORCE_RADIANS
 #define GLM_FORCE_DEFAULT_ALIGNED_GENTYPES
 
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
+
 // External Libraries
 #include <GLFW/glfw3.h>
 
@@ -50,7 +53,7 @@ const bool isInDebug = true;
 
 // Console FPS counter
 auto lastTime = std::chrono::steady_clock::now();
-int16_t frames = 0;
+int32_t frames = 0;
 #endif
 
 VkResult CreateDebugUtilsMessengerEXT(VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkDebugUtilsMessengerEXT* pDebugMessenger) {
@@ -116,6 +119,10 @@ private:
     VkBuffer indexBuffer;
     VkDeviceMemory indexBufferMemory;
 
+    // for 1 image only
+    VkImage textureImage;
+    VkDeviceMemory textureImageMemory;
+
     std::vector<VkBuffer> uniformBuffers;
     std::vector<VkDeviceMemory> uniformBuffersMemory;
     std::vector<void*> uniformBuffersMapped;
@@ -129,6 +136,8 @@ private:
 
     bool framebufferResized = false;
     uint32_t currentFrame = 0;
+
+    bool sharedTransferCommandPool;
 
     struct QueueFamilyIndices {
         std::optional<uint32_t> graphicsFamily;
@@ -184,6 +193,9 @@ private:
         createGraphicsPipeline();
         createFramebuffers();
         createCommandPools();
+
+        createTextureImage();
+
         createVertexBuffer();
         createIndexBuffer();
         createUniformBuffers();
@@ -198,9 +210,9 @@ private:
             glfwPollEvents();
             drawFrame();
 
-            if (isInDebug) {
+            #ifndef NDEBUG
                 countFPS(&frames, &lastTime);
-            }
+            #endif 
         }
 
         vkDeviceWaitIdle(device);
@@ -259,6 +271,149 @@ private:
 
         vkDestroySwapchainKHR(device, swapChain, nullptr);
         vkDestroyRenderPass(device, renderPass, nullptr);
+    }
+
+    void copyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height) {
+        VkCommandPool commandPool;
+        if (sharedTransferCommandPool) {
+            commandPool = graphicsCommandPool;
+        }
+        else {
+            commandPool = transferCommandPool;
+        }
+
+        VkCommandBuffer commandBuffer = beginSingleTimeCommands(commandPool);
+
+        VkBufferImageCopy region{};
+        region.bufferOffset = 0;
+        region.bufferRowLength = 0;
+        region.bufferImageHeight = 0;
+
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel = 0;
+        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.layerCount = 1;
+
+        region.imageOffset = { 0, 0, 0 };
+        region.imageExtent = {
+            width,
+            height,
+            1
+        };
+
+        vkCmdCopyBufferToImage(
+            commandBuffer,
+            buffer,
+            image,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1,
+            &region
+        );
+
+        endSingleTimeCommands(commandBuffer, commandPool);
+    }
+
+    void createTextureImage() {
+        int texWidth, texHeight, texChannels;
+        stbi_uc* pixels = stbi_load("textures/texture.jpg", &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+        VkDeviceSize imageSize = texWidth * texHeight * 4;
+
+        if (!pixels) {
+            throw std::runtime_error("failed to load texture image!");
+        }
+
+        VkBuffer stagingBuffer;
+        VkDeviceMemory stagingBufferMemory;
+
+        createBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory, true, nullptr);
+
+        void* data;
+        vkMapMemory(device, stagingBufferMemory, 0, imageSize, 0, &data);
+        memcpy(data, pixels, static_cast<size_t>(imageSize));
+        vkUnmapMemory(device, stagingBufferMemory);
+
+        stbi_image_free(pixels);
+
+        createImage(texWidth, texHeight, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+            VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, textureImage, textureImageMemory);
+    }
+
+    void createImage(uint32_t width, uint32_t height, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage,
+        VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& imageMemory) {
+        VkImageCreateInfo imageInfo{};
+        imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        imageInfo.imageType = VK_IMAGE_TYPE_2D;
+        imageInfo.extent.width = width;
+        imageInfo.extent.height = height;
+        imageInfo.extent.depth = 1;
+        imageInfo.mipLevels = 1;
+        imageInfo.arrayLayers = 1;
+        imageInfo.format = format;
+        imageInfo.tiling = tiling;
+        imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        imageInfo.usage = usage;
+        imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+        imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+        if (vkCreateImage(device, &imageInfo, nullptr, &image) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create image!");
+        }
+
+        VkMemoryRequirements memRequirements;
+        vkGetImageMemoryRequirements(device, image, &memRequirements);
+
+        VkMemoryAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocInfo.allocationSize = memRequirements.size;
+        allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties);
+
+        if (vkAllocateMemory(device, &allocInfo, nullptr, &imageMemory) != VK_SUCCESS) {
+            throw std::runtime_error("failed to allocate image memory!");
+        }
+
+        vkBindImageMemory(device, image, imageMemory, 0);
+    }
+
+    void transitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout) {
+        VkCommandPool commandPool;
+        if (sharedTransferCommandPool) {
+            commandPool = graphicsCommandPool;
+        }
+        else {
+            commandPool = transferCommandPool;
+        }
+
+        VkCommandBuffer commandBuffer = beginSingleTimeCommands(commandPool);
+
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.oldLayout = oldLayout;
+        barrier.newLayout = newLayout;
+
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+
+        barrier.image = image;
+        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        barrier.subresourceRange.baseMipLevel = 0;
+        barrier.subresourceRange.levelCount = 1;
+        barrier.subresourceRange.baseArrayLayer = 0;
+        barrier.subresourceRange.layerCount = 1;
+
+        barrier.srcAccessMask = 0; // TODO
+        barrier.dstAccessMask = 0; // TODO
+
+        vkCmdPipelineBarrier(
+            commandBuffer,
+            0 /* TODO */, 0 /* TODO */,
+            0,
+            0, nullptr,
+            0, nullptr,
+            1, &barrier
+        );
+
+        endSingleTimeCommands(commandBuffer, commandPool);
     }
 
     void createDescriptorSets() {
@@ -393,15 +548,16 @@ private:
 
     void createVertexBuffer() {
         VkDeviceSize bufferSize = sizeof(vertices[0]) * vertices.size();
+
         QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
 
-        bool sharingModeExclusive = indices.transferFamily == indices.graphicsFamily;
+        sharedTransferCommandPool = indices.transferFamily == indices.graphicsFamily;
         uint32_t queueFamilyIndicesArray[] = { indices.graphicsFamily.value(), indices.transferFamily.value() };
 
         VkBuffer stagingBuffer;
         VkDeviceMemory stagingBufferMemory;
         createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory, sharingModeExclusive, queueFamilyIndicesArray);
+            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory, sharedTransferCommandPool, queueFamilyIndicesArray);
 
         void* data;
         vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
@@ -410,9 +566,9 @@ private:
 
 
         createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, vertexBuffer, vertexBufferMemory, sharingModeExclusive, queueFamilyIndicesArray);
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, vertexBuffer, vertexBufferMemory, sharedTransferCommandPool, queueFamilyIndicesArray);
 
-        copyBuffer(stagingBuffer, vertexBuffer, bufferSize, sharingModeExclusive);
+        copyBuffer(stagingBuffer, vertexBuffer, bufferSize);
 
         vkDestroyBuffer(device, stagingBuffer, nullptr);
         vkFreeMemory(device, stagingBufferMemory, nullptr);
@@ -434,22 +590,35 @@ private:
         createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, indexBuffer, indexBufferMemory, true, nullptr);
 
-        copyBuffer(stagingBuffer, indexBuffer, bufferSize, true);
+        copyBuffer(stagingBuffer, indexBuffer, bufferSize);
 
         vkDestroyBuffer(device, stagingBuffer, nullptr);
         vkFreeMemory(device, stagingBufferMemory, nullptr);
     }
 
-    void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size, bool sharedTransferCommandPool) {
+    void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
+        VkCommandPool commandPool;
+        if (sharedTransferCommandPool) {
+            commandPool = graphicsCommandPool;
+        }
+        else {
+            commandPool = transferCommandPool;
+        }
+
+        VkCommandBuffer commandBuffer = beginSingleTimeCommands(commandPool);
+
+        VkBufferCopy copyRegion{};
+        copyRegion.size = size;
+        vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
+
+        endSingleTimeCommands(commandBuffer, commandPool);
+    }
+
+    VkCommandBuffer beginSingleTimeCommands(VkCommandPool commandPool) {
         VkCommandBufferAllocateInfo allocInfo{};
         allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
         allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        if (sharedTransferCommandPool) {
-            allocInfo.commandPool = graphicsCommandPool;
-        }
-        else {
-            allocInfo.commandPool = transferCommandPool;
-        }
+        allocInfo.commandPool = commandPool;
         allocInfo.commandBufferCount = 1;
 
         VkCommandBuffer commandBuffer;
@@ -461,12 +630,10 @@ private:
 
         vkBeginCommandBuffer(commandBuffer, &beginInfo);
 
-        VkBufferCopy copyRegion{};
-        copyRegion.srcOffset = 0; // Optional
-        copyRegion.dstOffset = 0; // Optional
-        copyRegion.size = size;
-        vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
+        return commandBuffer;
+    }
 
+    void endSingleTimeCommands(VkCommandBuffer commandBuffer, VkCommandPool commandPool) {
         vkEndCommandBuffer(commandBuffer);
 
         VkSubmitInfo submitInfo{};
@@ -476,12 +643,8 @@ private:
 
         vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
         vkQueueWaitIdle(graphicsQueue);
-        if (sharedTransferCommandPool) {
-            vkFreeCommandBuffers(device, graphicsCommandPool, 1, &commandBuffer);
-        }
-        else {
-            vkFreeCommandBuffers(device, transferCommandPool, 1, &commandBuffer);
-        }
+
+        vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
     }
 
     uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
@@ -532,11 +695,16 @@ private:
     {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}},
     {{0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}},
     {{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}},
-    {{-0.5f, 0.5f}, {1.0f, 1.0f, 1.0f}}
+    {{-0.5f, 0.5f}, {1.0f, 1.0f, 1.0f}},
+
+    {{-1.5f, -1.5f}, {1.0f, 0.0f, 0.0f}},
+    {{-0.5f, -1.5f}, {0.0f, 1.0f, 0.0f}},
+    {{-0.5f, -0.5f}, {0.0f, 0.0f, 1.0f}},
+    {{-1.5f, -0.5f}, {1.0f, 1.0f, 1.0f}}
     };
 
     const std::vector<uint16_t> indices = {
-    0, 1, 2, 2, 3, 0
+    0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4
     };
 
     static void framebufferResizeCallback(GLFWwindow* window, int width, int height) {
@@ -1395,7 +1563,7 @@ private:
         return true;
     }
 
-    void countFPS(int16_t* frames, auto* lastTime) {
+    void countFPS(int32_t* frames, auto* lastTime) {
         auto now = std::chrono::steady_clock::now();
         auto elapsedSeconds = std::chrono::duration_cast<std::chrono::seconds>(now - *lastTime).count();
         (*frames)++;
