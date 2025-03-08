@@ -141,6 +141,9 @@ private:
     std::vector<VkSemaphore> renderFinishedSemaphores;
     std::vector<VkFence> inFlightFences;
 
+    VkFence setupFence;
+    VkCommandBuffer setupCommandBuffer;
+
     bool framebufferResized = false;
     uint32_t currentFrame = 0;
 
@@ -199,17 +202,17 @@ private:
         createGraphicsPipeline();
         createCommandPools();
 
-        VkCommandBuffer setupCommandBuffer = beginSingleTimeCommands();
-        createDepthResources(setupCommandBuffer);
+        createSetupFence();
+        createSetupCommandBuffer();
 
+        createDepthResources();
         createFramebuffers();
-
-        createTextureImage(setupCommandBuffer);
-
+        createTextureImage();
         createTextureImageView();
         createTextureSampler();
         createVertexBuffer();
         createIndexBuffer();
+
         createUniformBuffers();
         createDescriptorPool();
         createDescriptorSets();
@@ -236,6 +239,8 @@ private:
     }
 
     void cleanup() {
+        endSingleTimeCommands(setupCommandBuffer);
+
         cleanupSwapChain();
 
         vkDestroySampler(device, textureSampler, nullptr);
@@ -266,6 +271,7 @@ private:
             vkDestroySemaphore(device, renderFinishedSemaphores[i], nullptr);
             vkDestroyFence(device, inFlightFences[i], nullptr);
         }
+        vkDestroyFence(device, setupFence, nullptr);
 
         vkDestroyCommandPool(device, CommandPool, nullptr);
 
@@ -298,9 +304,7 @@ private:
         createImageViews();
         createRenderPass();
 
-        VkCommandBuffer setupCommandBuffer = beginSingleTimeCommands();
-        createDepthResources(setupCommandBuffer);
-        endSingleTimeCommands(setupCommandBuffer);
+        createDepthResources();
 
         createFramebuffers();
     }
@@ -322,13 +326,41 @@ private:
         vkDestroyRenderPass(device, renderPass, nullptr);
     }
 
-    void createDepthResources(VkCommandBuffer commandBuffer) {
+    void createSetupFence() {
+        VkFenceCreateInfo fenceInfo{};
+        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        fenceInfo.flags = 0;
+
+        if (vkCreateFence(device, &fenceInfo, nullptr, &setupFence) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create fence!");
+        }
+    }
+
+    void createSetupCommandBuffer() {
+        VkCommandBufferAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocInfo.commandPool = CommandPool;
+        allocInfo.commandBufferCount = 1;
+
+        vkAllocateCommandBuffers(device, &allocInfo, &setupCommandBuffer);
+
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;;
+
+        vkBeginCommandBuffer(setupCommandBuffer, &beginInfo);
+    }
+
+    void createDepthResources() {
         VkFormat depthFormat = findDepthFormat();
         createImage(swapChainExtent.width, swapChainExtent.height, depthFormat, VK_IMAGE_TILING_OPTIMAL,
             VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, depthImage, depthImageMemory);
         depthImageView = createImageView(depthImage, depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT);
 
-        transitionImageLayout(depthImage, depthFormat, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, commandBuffer);
+        transitionImageLayout(depthImage, depthFormat, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, setupCommandBuffer);
+
+        flushCommandBufferCommands(setupCommandBuffer, setupFence);
     }
 
     VkFormat findSupportedFormat(const std::vector<VkFormat>& candidates, VkImageTiling tiling, VkFormatFeatureFlags features) {
@@ -442,7 +474,7 @@ private:
         textureImageView = createImageView(textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_ASPECT_COLOR_BIT);
     }
 
-    void createTextureImage(VkCommandBuffer commandBuffer) {
+    void createTextureImage() {
         int texWidth, texHeight, texChannels;
         stbi_uc* pixels = stbi_load("textures/texture.jpg", &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
         VkDeviceSize imageSize = texWidth * texHeight * 4;
@@ -466,19 +498,17 @@ private:
             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, textureImage, textureImageMemory);
 
         transitionImageLayout(textureImage, VK_FORMAT_R8G8B8A8_SRGB,
-            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, commandBuffer);
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, setupCommandBuffer);
 
-        copyBufferToImage(stagingBuffer, textureImage, static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight), commandBuffer);
+        copyBufferToImage(stagingBuffer, textureImage, static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight), setupCommandBuffer);
 
         transitionImageLayout(textureImage, VK_FORMAT_R8G8B8A8_SRGB,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, commandBuffer);
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, setupCommandBuffer);
 
-        flushCommandBufferCommands(commandBuffer);
+        flushCommandBufferCommands(setupCommandBuffer, setupFence);
 
         vkDestroyBuffer(device, stagingBuffer, nullptr);
         vkFreeMemory(device, stagingBufferMemory, nullptr);
-
-        vkResetCommandBuffer(commandBuffer, 0);
     }
 
     void createImage(uint32_t width, uint32_t height, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage,
@@ -580,14 +610,6 @@ private:
             0, nullptr,
             1, &barrier
         );
-
-        // All of the helper functions that submit commands so far have been set up to execute synchronously
-        // by waiting for the queue to become idle. For practical applications it is recommended to combine 
-        // these operations in a single command buffer and execute them asynchronously for higher throughput,
-        // especially the transitions and copy in the createTextureImage function. Try to experiment with this
-        // by creating a setupCommandBuffer that the helper functions record commands into, and add a
-        // flushSetupCommands to execute the commands that have been recorded so far. It's best to do this
-        // after the texture mapping works to check if the texture resources are still set up correctly.
     }
 
     void createDescriptorSets() {
@@ -749,7 +771,9 @@ private:
         createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, vertexBuffer, vertexBufferMemory);
 
-        copyBuffer(stagingBuffer, vertexBuffer, bufferSize);
+        copyBuffer(stagingBuffer, vertexBuffer, bufferSize, setupCommandBuffer);
+
+        flushCommandBufferCommands(setupCommandBuffer, setupFence);
 
         vkDestroyBuffer(device, stagingBuffer, nullptr);
         vkFreeMemory(device, stagingBufferMemory, nullptr);
@@ -771,21 +795,18 @@ private:
         createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, indexBuffer, indexBufferMemory);
 
-        copyBuffer(stagingBuffer, indexBuffer, bufferSize);
+        copyBuffer(stagingBuffer, indexBuffer, bufferSize, setupCommandBuffer);
+
+        flushCommandBufferCommands(setupCommandBuffer, setupFence);
 
         vkDestroyBuffer(device, stagingBuffer, nullptr);
         vkFreeMemory(device, stagingBufferMemory, nullptr);
     }
 
-    void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
-
-        VkCommandBuffer commandBuffer = beginSingleTimeCommands();
-
+    void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size, VkCommandBuffer commandBuffer) {
         VkBufferCopy copyRegion{};
         copyRegion.size = size;
         vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
-
-        endSingleTimeCommands(commandBuffer);
     }
 
     VkCommandBuffer beginSingleTimeCommands() {
@@ -800,7 +821,7 @@ private:
 
         VkCommandBufferBeginInfo beginInfo{};
         beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;;
 
         vkBeginCommandBuffer(commandBuffer, &beginInfo);
 
@@ -820,19 +841,12 @@ private:
         vkFreeCommandBuffers(device, CommandPool, 1, &commandBuffer);
     }
 
-    void flushCommandBufferCommands(VkCommandBuffer commandBuffer) {
+    void flushCommandBufferCommands(VkCommandBuffer commandBuffer, VkFence fence) {
         if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
             throw std::runtime_error("failed to record command buffer!");
         }
 
-        VkFenceCreateInfo fenceInfo{};
-        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-        fenceInfo.flags = 0;
-
-        VkFence fence;
-        if (vkCreateFence(device, &fenceInfo, nullptr, &fence) != VK_SUCCESS) {
-            throw std::runtime_error("failed to create fence!");
-        }
+        vkResetFences(device, 1, &fence);
 
         VkSubmitInfo submitInfo{};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -847,7 +861,15 @@ private:
             throw std::runtime_error("failed to wait for fence!");
         }
 
-        vkDestroyFence(device, fence, nullptr);
+        vkResetCommandBuffer(commandBuffer, 0);
+
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
+
+        if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
+            throw std::runtime_error("failed to begin recording command buffer!");
+        }
     }
 
     uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
