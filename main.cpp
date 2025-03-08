@@ -147,7 +147,7 @@ private:
     struct QueueFamilyIndices {
         std::optional<uint32_t> graphicsFamily;
         std::optional<uint32_t> presentFamily;
- 
+
         bool isComplete() {
             // return graphicsFamily.has_value() && presentFamily.has_value();
             return graphicsFamily.has_value() && presentFamily.has_value();
@@ -185,6 +185,8 @@ private:
     }
 
     void initVulkan() {
+        auto then = std::chrono::steady_clock::now();
+
         createInstance();
         setupDebugMessenger();
         createSurface();
@@ -196,9 +198,14 @@ private:
         createDescriptorSetLayout();
         createGraphicsPipeline();
         createCommandPools();
-        createDepthResources();
+
+        VkCommandBuffer setupCommandBuffer = beginSingleTimeCommands();
+        createDepthResources(setupCommandBuffer);
+
         createFramebuffers();
-        createTextureImage();
+
+        createTextureImage(setupCommandBuffer);
+
         createTextureImageView();
         createTextureSampler();
         createVertexBuffer();
@@ -208,6 +215,11 @@ private:
         createDescriptorSets();
         createCommandBuffers();
         createSyncObjects();
+
+        auto now = std::chrono::steady_clock::now();
+        auto elapsedSeconds = std::chrono::duration_cast<std::chrono::milliseconds>(now - then).count();
+
+        std::cout << elapsedSeconds;
     }
 
     void mainLoop() {
@@ -215,9 +227,9 @@ private:
             glfwPollEvents();
             drawFrame();
 
-            #ifndef NDEBUG
-                countFPS(&frames, &lastTime);
-            #endif 
+#ifndef NDEBUG
+            //countFPS(&frames, &lastTime);
+#endif 
         }
 
         vkDeviceWaitIdle(device);
@@ -254,7 +266,7 @@ private:
             vkDestroySemaphore(device, renderFinishedSemaphores[i], nullptr);
             vkDestroyFence(device, inFlightFences[i], nullptr);
         }
-                
+
         vkDestroyCommandPool(device, CommandPool, nullptr);
 
         vkDestroyDevice(device, nullptr);
@@ -285,7 +297,11 @@ private:
         createSwapChain();
         createImageViews();
         createRenderPass();
-        createDepthResources();
+
+        VkCommandBuffer setupCommandBuffer = beginSingleTimeCommands();
+        createDepthResources(setupCommandBuffer);
+        endSingleTimeCommands(setupCommandBuffer);
+
         createFramebuffers();
     }
 
@@ -306,14 +322,13 @@ private:
         vkDestroyRenderPass(device, renderPass, nullptr);
     }
 
-    void createDepthResources() {
+    void createDepthResources(VkCommandBuffer commandBuffer) {
         VkFormat depthFormat = findDepthFormat();
-        createImage(swapChainExtent.width, swapChainExtent.height, depthFormat, VK_IMAGE_TILING_OPTIMAL, 
+        createImage(swapChainExtent.width, swapChainExtent.height, depthFormat, VK_IMAGE_TILING_OPTIMAL,
             VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, depthImage, depthImageMemory);
         depthImageView = createImageView(depthImage, depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT);
 
-        transitionImageLayout(depthImage, depthFormat, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-
+        transitionImageLayout(depthImage, depthFormat, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, commandBuffer);
     }
 
     VkFormat findSupportedFormat(const std::vector<VkFormat>& candidates, VkImageTiling tiling, VkFormatFeatureFlags features) {
@@ -375,9 +390,7 @@ private:
         }
     }
 
-    void copyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height) {
-        VkCommandBuffer commandBuffer = beginSingleTimeCommands();
-
+    void copyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height, VkCommandBuffer commandBuffer) {
         VkBufferImageCopy region{};
         region.bufferOffset = 0;
         region.bufferRowLength = 0;
@@ -403,8 +416,6 @@ private:
             1,
             &region
         );
-
-        endSingleTimeCommands(commandBuffer);
     }
 
     VkImageView createImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags) {
@@ -431,7 +442,7 @@ private:
         textureImageView = createImageView(textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_ASPECT_COLOR_BIT);
     }
 
-    void createTextureImage() {
+    void createTextureImage(VkCommandBuffer commandBuffer) {
         int texWidth, texHeight, texChannels;
         stbi_uc* pixels = stbi_load("textures/texture.jpg", &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
         VkDeviceSize imageSize = texWidth * texHeight * 4;
@@ -442,28 +453,32 @@ private:
 
         VkBuffer stagingBuffer;
         VkDeviceMemory stagingBufferMemory;
-
-        createBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+        createBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            stagingBuffer, stagingBufferMemory);
 
         void* data;
         vkMapMemory(device, stagingBufferMemory, 0, imageSize, 0, &data);
         memcpy(data, pixels, static_cast<size_t>(imageSize));
         vkUnmapMemory(device, stagingBufferMemory);
-
         stbi_image_free(pixels);
 
-        createImage(texWidth, texHeight, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-            VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, textureImage, textureImageMemory);
+        createImage(texWidth, texHeight, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, textureImage, textureImageMemory);
 
-        transitionImageLayout(textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-        copyBufferToImage(stagingBuffer, textureImage, static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight));
+        transitionImageLayout(textureImage, VK_FORMAT_R8G8B8A8_SRGB,
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, commandBuffer);
 
-        transitionImageLayout(textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        copyBufferToImage(stagingBuffer, textureImage, static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight), commandBuffer);
+
+        transitionImageLayout(textureImage, VK_FORMAT_R8G8B8A8_SRGB,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, commandBuffer);
+
+        flushCommandBufferCommands(commandBuffer);
 
         vkDestroyBuffer(device, stagingBuffer, nullptr);
         vkFreeMemory(device, stagingBufferMemory, nullptr);
+
+        vkResetCommandBuffer(commandBuffer, 0);
     }
 
     void createImage(uint32_t width, uint32_t height, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage,
@@ -502,9 +517,7 @@ private:
         vkBindImageMemory(device, image, imageMemory, 0);
     }
 
-    void transitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout) {
-        VkCommandBuffer commandBuffer = beginSingleTimeCommands();
-
+    void transitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout, VkCommandBuffer commandBuffer) {
         VkImageMemoryBarrier barrier{};
         barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         barrier.oldLayout = oldLayout;
@@ -514,7 +527,7 @@ private:
         barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 
         barrier.image = image;
-       
+
         if (newLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
             barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
 
@@ -567,8 +580,6 @@ private:
             0, nullptr,
             1, &barrier
         );
-
-        endSingleTimeCommands(commandBuffer);
 
         // All of the helper functions that submit commands so far have been set up to execute synchronously
         // by waiting for the queue to become idle. For practical applications it is recommended to combine 
@@ -806,8 +817,37 @@ private:
 
         vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
         vkQueueWaitIdle(graphicsQueue);
-
         vkFreeCommandBuffers(device, CommandPool, 1, &commandBuffer);
+    }
+
+    void flushCommandBufferCommands(VkCommandBuffer commandBuffer) {
+        if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
+            throw std::runtime_error("failed to record command buffer!");
+        }
+
+        VkFenceCreateInfo fenceInfo{};
+        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        fenceInfo.flags = 0;
+
+        VkFence fence;
+        if (vkCreateFence(device, &fenceInfo, nullptr, &fence) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create fence!");
+        }
+
+        VkSubmitInfo submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &commandBuffer;
+
+        if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, fence) != VK_SUCCESS) {
+            throw std::runtime_error("failed to submit command buffer!");
+        }
+
+        if (vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+            throw std::runtime_error("failed to wait for fence!");
+        }
+
+        vkDestroyFence(device, fence, nullptr);
     }
 
     uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
@@ -1006,7 +1046,7 @@ private:
 
         renderPassInfo.renderArea.offset = { 0, 0 };
         renderPassInfo.renderArea.extent = swapChainExtent;
-        
+
         std::array<VkClearValue, 2> clearValues{};
         clearValues[0].color = { {0.0f, 0.0f, 0.0f, 1.0f} };
         clearValues[1].depthStencil = { 1.0f, 0 };
@@ -1103,7 +1143,7 @@ private:
 
     void createGraphicsPipeline() {
         auto fragShaderCode = readFile("CompiledShaders/fragShader.spv");
-        auto vertShaderCode= readFile("CompiledShaders/vertShader.spv");
+        auto vertShaderCode = readFile("CompiledShaders/vertShader.spv");
 
         VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
         VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
@@ -1140,8 +1180,8 @@ private:
         inputAssembly.primitiveRestartEnable = VK_FALSE;
 
         VkViewport viewport{};
-        viewport.x = 0.0f; 
-        viewport.y = 0.0f; 
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
         viewport.width = (float)swapChainExtent.width;
         viewport.height = (float)swapChainExtent.height;
         viewport.minDepth = 0.0f;
@@ -1550,7 +1590,7 @@ private:
         if (indicies.graphicsFamily.has_value() && indicies.presentFamily.has_value()) {
             score += 500;
         }
-         
+
         if (isInDebug) {
             std::cout << '\t' << deviceProperties.deviceName << ", " << score << '\n';
         }
@@ -1559,13 +1599,13 @@ private:
     }
 
     QueueFamilyIndices findQueueFamilies(VkPhysicalDevice device) {
-		QueueFamilyIndices indices;
+        QueueFamilyIndices indices;
 
-		uint32_t queueFamilyCount = 0;
-		vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, nullptr);
+        uint32_t queueFamilyCount = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, nullptr);
 
-		std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
-		vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, queueFamilies.data());
+        std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+        vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, queueFamilies.data());
 
         int i = 0;
         for (const auto& queueFamily : queueFamilies) {
@@ -1761,7 +1801,7 @@ private:
         if (enableValidationLayers && !checkValidationLayerSupport()) {
             throw std::runtime_error("validation layers requested, but not available!");
         }
-        
+
         VkApplicationInfo appInfo{};
         appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
         appInfo.pApplicationName = "IDK";
