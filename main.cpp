@@ -76,8 +76,9 @@ struct SwapChainSupportDetails {
 struct PushConstantData {
     glm::vec2 offset;
     glm::vec2 mousePos;
-    float screenSize1D;
+    glm::vec2 resolution;
     float scale;
+    float time;
 };
 
 struct KeyMappings {
@@ -100,7 +101,7 @@ struct KeyMappings {
 
 glm::vec2 offset{};
 
-class FractalRenderer {
+class Raymarcher {
 public:
     void run() {
         initWindow();
@@ -155,6 +156,8 @@ private:
 
     KeyMappings keys{};
 
+    std::chrono::time_point<std::chrono::high_resolution_clock> startTime;
+
     void initWindow() {
         glfwInit();
 
@@ -168,19 +171,19 @@ private:
     }
 
     static void framebufferResizeCallback(GLFWwindow* window, int width, int height) {
-        auto app = reinterpret_cast<FractalRenderer*>(glfwGetWindowUserPointer(window));
+        auto app = reinterpret_cast<Raymarcher*>(glfwGetWindowUserPointer(window));
         app->framebufferResized = true;
     }
 
     static void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
-        auto app = reinterpret_cast<FractalRenderer*>(glfwGetWindowUserPointer(window));
+        auto app = reinterpret_cast<Raymarcher*>(glfwGetWindowUserPointer(window));
         if (app) {
             app->keys.scrollOffset += static_cast<float>(yoffset) * 0.5f;
         }
     }
 
     static void cursor_position_callback(GLFWwindow* window, double xpos, double ypos) {
-        auto app = reinterpret_cast<FractalRenderer*>(glfwGetWindowUserPointer(window));
+        auto app = reinterpret_cast<Raymarcher*>(glfwGetWindowUserPointer(window));
         if (app) {
             app->keys.mouseX = static_cast<float>(xpos);
             app->keys.mouseY = static_cast<float>(ypos);
@@ -207,6 +210,7 @@ private:
         createDescriptorSets();
         createCommandBuffers();
         createSyncObjects();
+            startTime = std::chrono::high_resolution_clock::now();
     }
 
     void mainLoop() {
@@ -1075,11 +1079,15 @@ private:
 
         glm::vec2 offsetNorm = { offset.x / swapChainExtent.width, offset.y / swapChainExtent.height };
 
+        auto now = std::chrono::high_resolution_clock::now();
+        float elapsedSeconds = std::chrono::duration<float>(now - startTime).count();
+
         PushConstantData push{};
-        push.screenSize1D = std::max(swapChainExtent.width, swapChainExtent.height);
+        push.resolution = { swapChainExtent.width, swapChainExtent.height };
         push.offset = offsetNorm;
         push.mousePos = { keys.mouseX / swapChainExtent.width, keys.mouseY / swapChainExtent.height };
         push.scale = zoomFactor;
+        push.time = elapsedSeconds;
 
         vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstantData), &push);
 
@@ -1401,7 +1409,7 @@ private:
 };
 
 int main() {
-    FractalRenderer app;
+    Raymarcher app;
 
     try {
         app.run();

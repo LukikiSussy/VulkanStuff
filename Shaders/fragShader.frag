@@ -3,41 +3,57 @@
 layout(push_constant) uniform Push {
     vec2 offset;
     vec2 mousePos;
-    float screenSize;
+    vec2 resolution;
     float scale;
+    float time;
 } push;
 
 layout(location = 0) out vec4 outColor;
 
 layout(binding = 0) uniform sampler2D myTexture;
 
-
-dvec2 complexSquare(dvec2 z) {
-    return dvec2(z.x * z.x - z.y * z.y, 2.0 * z.x * z.y);
+float sdSphere(vec3 p, float r) {
+    return length(p) - r; // distance to a sphere
 }
 
-float mandelbrot(vec2 uv) {
-    dvec2 c = dvec2(uv / push.scale) + push.offset * push.screenSize * 0.5;
-    dvec2 z = vec2(0.0);
-    int i;
-    int maxIterations = max(int(100.0 + log2(push.scale) * 50.0), 100);
-    for (i = 0; i < maxIterations; i++) {
-        z = complexSquare(z) + complexSquare(c);
-        if (dot(z, z) > 4.0) break;  
-    }
-    return float(i) / 100.0;  
+float map(vec3 p) {
+    vec3 spherePos1 = vec3(sin((push.time)), 0, cos(push.time)); // center of the sphere
+    float sphere1 = sdSphere(p - spherePos1, 1.0);
+
+    vec3 spherePos2 = vec3(sin((push.time + 3.14)), 0, cos(push.time + 3.14)); // center of the sphere
+    float sphere2 = sdSphere(p - spherePos2, 1.0);
+
+    return min(sphere1, sphere2); // distance to the sphere
 }
 
 void main()
 {
-    vec2 uv = (gl_FragCoord.xy / push.screenSize) * 2.0 - 1.0;
+    vec2 uv = (gl_FragCoord.xy * 2.0 - push.resolution) / push.resolution.y;
 
-    float funcVal = clamp(mandelbrot(uv), 0.01, 1.0);
+    // Initialization
+    vec3 ro = vec3(0, 0, -3);         // ray origin
+    vec3 rd = normalize(vec3(uv, 1)); // ray direction
+    vec3 col = vec3(0);               // final pixel color
 
-    if(funcVal >= 0.99) {
-        outColor = vec4(0, 0, 0, 1);
+    float t = 0.; // total distance travelled
+
+    int i;
+    // Raymarching
+    for (i = 0; i < 80; i++) {
+        vec3 p = ro + rd * t;     // position along the ray
+
+        float d = map(p);         // current distance to the scene
+
+        t += d;                   // "march" the ray
+
+        if (d < .001) break;      // early stop if close enough
+        if (t > 100.) break;      // early stop if too far
     }
-    else {
-        outColor = texture(myTexture, vec2(funcVal, funcVal));
-    }
+
+    // Coloring
+    col = vec3(t * .2);           // color based on distance
+
+    float dist = min(t * .2, 1);
+
+    outColor = texture(myTexture, vec2(dist, 0));
 }
