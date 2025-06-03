@@ -1086,8 +1086,10 @@ private:
         push.resolution = { swapChainExtent.width, swapChainExtent.height };
         push.offset = offsetNorm;
         push.mousePos = { keys.mouseX / swapChainExtent.width, keys.mouseY / swapChainExtent.height };
-        push.scale = zoomFactor;
+        push.scale = log2(zoomFactor + 1);
         push.time = elapsedSeconds;
+
+        std::cout << push.scale << "\n";
 
         vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstantData), &push);
 
